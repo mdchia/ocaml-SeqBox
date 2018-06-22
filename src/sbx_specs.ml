@@ -1,13 +1,12 @@
 open Stdint
-open Misc_utils
 
 type version = [ `V1 | `V2 | `V3 ]
 
 module Common_param = struct
-  let file_uid_len   : int   = 6
-  let signature      : bytes = "SBx"
-  let header_size    : int   = 16
-  let max_blocks_num : int64 = Int64.sub (Int64.shift_left 0x1L 32) 1L  (* 2 ** 32 - 1 *)
+  let file_uid_len   : int    = 6
+  let signature      : string = "SBx"
+  let header_size    : int    = 16
+  let max_blocks_num : int64  = Int64.sub (Int64.shift_left 0x1L 32) 1L  (* 2 ** 32 - 1 *)
 end
 
 module Param_for_v1 = struct
@@ -69,8 +68,12 @@ let ver_to_uint16       (ver:version) : uint16 =
   Uint16.of_int (ver_to_int ver)
 ;;
 
-let ver_to_bytes        (ver:version) : bytes =
-  Conv_utils.uint8_to_bytes (ver_to_uint8 ver)
+let ver_to_string       (ver:version) : string =
+  Conv_utils.uint8_to_string (ver_to_uint8 ver)
+;;
+
+let ver_to_human_string (ver:version) : string =
+  string_of_int (ver_to_int ver)
 ;;
 
 let ver_to_block_size   (ver:version) : int =
@@ -98,8 +101,4 @@ let string_to_ver       (str:string)  : (version, string) result =
   | "2" -> Ok `V2
   | "3" -> Ok `V3
   | _   -> Error "Invalid version string"
-;;
-
-let ver_to_string       (ver:version) : string =
-  Printf.sprintf "%d" (ver_to_int ver)
 ;;

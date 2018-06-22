@@ -15,5 +15,14 @@ end
 type stats = Stats.t
 
 module Process : sig
-  val rescue_from_file : in_filename:string -> out_dirname:string -> log_filename:string option -> (stats, string) result
+  val rescue_from_file :
+    only_pick_block:Block.block_type ->
+    only_pick_uid:string option ->
+    from_byte:int64 option ->
+    to_byte:int64 option ->
+    force_misalign:bool ->
+    in_filename:string ->
+    out_dirname:string ->
+    log_filename:string option ->
+    (stats, string) result
 end

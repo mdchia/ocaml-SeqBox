@@ -4,16 +4,23 @@ Table of Contents
 =================
 
    * [Specification of ocaml-SeqBox](#specification-of-ocaml-seqbox)
+      * [Error handling behaviour in general](#error-handling-behaviour-in-general)
       * [Encoding workflow](#encoding-workflow)
       * [Decoding workflow](#decoding-workflow)
             * [Handling of duplicate metadata/data blocks](#handling-of-duplicate-metadatadata-blocks)
             * [Handling of duplicate metadata in metadata block given the block is valid](#handling-of-duplicate-metadata-in-metadata-block-given-the-block-is-valid)
       * [Rescuing workflow](#rescuing-workflow)
+      * [Show workflow](#show-workflow)
       * [To successfully encode a file](#to-successfully-encode-a-file)
       * [To successfully decode a sbx container](#to-successfully-decode-a-sbx-container)
       * [To successfully rescue your sbx container](#to-successfully-rescue-your-sbx-container)
 
 Created by [gh-md-toc](https://github.com/ekalinin/github-markdown-toc)
+
+## Error handling behaviour in general
+  - Osbx does **not** remove the generated file(s) even in case of failure
+    - This applies to encoding, decoding, rescuing (showing does not generate any files)
+    - This is mainly for in case the partial data is useful to the user
 
 ## Encoding workflow
   1. If metadata is enabled, the following file metadata are gathered from file or retrieved from user input : file name, sbx file name, file size, file last modification time, encoding start time
@@ -39,8 +46,11 @@ Data block is valid if and only if
 
   1. A reference block is retrieved first(which is used for guidance on alignment, version, and uid)
     - the entire sbx container is scanned using alignment of 128 bytes, 128 is used as it is the largest common divisor of 512(block size for version 1), 128(block size for verion 2), and 4096(block size for version 3)
-    - if there is any valid metadata block in sbx container, then the first one will be used as reference block
-    - else the first valid data block will be used as reference block
+    - if no-meta flag is specified
+      - the first whatever valid block(i.e. valid metadata or data block) will be used as reference block
+    - else
+      - if there is any valid metadata block in sbx container, then the first one will be used as reference block
+      - else the first valid data block will be used as reference block
   2. Scan for valid blocks from start of sbx container to decode and output using reference block's block size as alignment
     - if a block is invalid, nothing is done
     - if a block is valid, and is a metadata block, nothing is done
@@ -65,14 +75,23 @@ Data block is valid if and only if
   1. Scan for valid blocks from start of the provided file using 128 bytes alignment
     - rescue mode rescues all 3 versions of sbx blocks
     - if log file is specified, then
-      - the log file will be used to initialize the scan's starting position
+      - if the log file exists, then it will be used to initialize the scan's starting position
         - bytes_processed field will be rounded down to closest multiple of 128 automatically
-      - the log file will be updated on every read of bytes
+      - the log file will be updated on every ~1.0 second
     - each block is appended to OUTDIR/uid, where :
       - OUTDIR = output directory specified
       - uid    = uid of the block in hex
     - the original bytes in the file is used, that is, the output block bytes are not generated from scratch by osbx
   2. User is expected to attempt to decode the rescued data in OUTDIR using the osbx decode command
+
+## Show workflow
+  1. Scan for metadata blocks from start of provided file using 128 bytes alignment
+    - if block scanned has sequence number 0, then
+      - if the block is a valid metadatablock, it will be collected
+      - up to some specified maximum number of blocks are collected(defaults to 1)
+    - else
+      - nothing is done
+  2. Metadata of collected list of metadata blocks are displayed
 
 ## To successfully encode a file
   - File size must be within threshold

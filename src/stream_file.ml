@@ -21,18 +21,18 @@ module General_helper = struct
     Bytes.make size '\x00'
   ;;
 
-  let get_from_buf ~(buf:bytes) ~(pos:int) ~(len:int) : bytes =
+  let get_from_buf ~(buf:string) ~(pos:int) ~(len:int) : string =
     try
-      Misc_utils.get_bytes buf ~pos ~len
+      Misc_utils.get_sub_string buf ~pos ~len
     with
     | Misc_utils.Invalid_range -> raise Invalid_range
   ;;
 
-  let get_from_buf_inc_range ~(buf:bytes) ~(start_at:int) ~(end_at:int) : bytes =
+  let get_from_buf_inc_range ~(buf:string) ~(start_at:int) ~(end_at:int) : string =
     get_from_buf ~buf ~pos:start_at ~len:(end_at     - start_at + 1)
   ;;
 
-  let get_from_buf_exc_range ~(buf:bytes) ~(start_at:int) ~(end_before:int) : bytes =
+  let get_from_buf_exc_range ~(buf:string) ~(start_at:int) ~(end_before:int) : string =
     get_from_buf ~buf ~pos:start_at ~len:(end_before - start_at)
   ;;
 end
@@ -49,11 +49,10 @@ module Read_into_buf = struct
      * there is still more data available in the channel
      *
      * this sometimes happen for some reason when reading large files
-     * (1GiB file was being used when this occured in testing)
+     * (1 GiB file was being used when this occured in testing)
      *)
     let jitter_threshold = 5 in
     let rec read_with_jitter_internal ~(read_so_far:int) ~(tries_left:int) : int =
-      (* let read_count  : int = Core_kernel.In_channel.input in_file ~buf ~pos:read_so_far ~len:(len - read_so_far) in *)
       let read_count  : int = input in_file buf read_so_far (len - read_so_far) in
       let read_so_far : int = read_so_far + read_count in
       let tries_left  : int = tries_left - 1 in
@@ -92,7 +91,7 @@ module Read_into_buf = struct
 end
 
 module Read_chunk = struct
-  type read_content = { chunk : bytes }
+  type read_content = { chunk : string }
   type read_result  = read_content option
 
   let read (in_file:in_channel) ~(len:int) : read_result =
@@ -100,7 +99,9 @@ module Read_chunk = struct
       let buf = General_helper.make_buffer len in
       match Read_into_buf.read in_file ~buf with
       | None                -> None
-      | Some { read_count } -> let chunk = General_helper.get_from_buf ~buf ~pos:0 ~len:read_count in
+      | Some { read_count } ->
+        let buf   = Bytes.to_string buf in
+        let chunk = General_helper.get_from_buf ~buf ~pos:0 ~len:read_count in
         Some { chunk }
     with
     (* Read_chunk.read should never raise any exceptions related to use of Read_into_buf.read *)
@@ -130,9 +131,9 @@ module Write_from_buf = struct
 end
 
 module Write_chunk = struct
-  let write (out_file:out_channel) ~(chunk:bytes) : unit =
+  let write (out_file:out_channel) ~(chunk:string) : unit =
     try
-      Write_from_buf.write out_file ~buf:chunk
+      Write_from_buf.write out_file ~buf:(Bytes.of_string chunk)
     with
     (* Write_chunk.write should never raise any exceptions related to use of Write_from_buf.write *)
     | Write_from_buf.Invalid_offset
@@ -194,7 +195,7 @@ module Stream = struct
     | Write_from_buf.Invalid_offset   -> Error "Invalid offset provided to Write_from_buf.write"
     | Write_from_buf.Invalid_length   -> Error "Invalid length provided to Write_from_buf.write"
     | Sys_error msg                   -> Error (Sprintf_helper.sprintf_failed_to_rw ~in_filename ~out_filename ~msg)
-    | _                               -> Error "Unknown failure"
+    | _ when Debug_param.Stream_file.capture_all_exn_in_unknown_err -> Error "Unknown error"
   ;;
 
   let process_in ?(pack_break_into_error:bool = true) ~(in_filename:string) (processor:('a in_processor))   : ('a, string) result =
@@ -220,7 +221,7 @@ module Stream = struct
     | Read_into_buf.Invalid_offset    -> Error "Invalid offset provided to Read_into_buf.read"
     | Read_into_buf.Invalid_length    -> Error "Invalid length provided to Read_into_buf.read"
     | Sys_error msg                   -> Error (Sprintf_helper.sprintf_failed_to_read ~in_filename ~msg)
-    | _                               -> Error "Unknown failure"
+    | _ when Debug_param.Stream_file.capture_all_exn_in_unknown_err -> Error "Unknown error"
   ;;
 
   let process_out ?(pack_break_into_error:bool = true) ~(append:bool) ~(out_filename:string) (processor:('a out_processor)) : ('a, string) result =
@@ -246,6 +247,6 @@ module Stream = struct
     | Write_from_buf.Invalid_offset   -> Error "Invalid offset provided to Write_from_buf.write"
     | Write_from_buf.Invalid_length   -> Error "Invalid length provided to Write_from_buf.write"
     | Sys_error msg                   -> Error (Sprintf_helper.sprintf_failed_to_write ~out_filename ~msg)
-    | _                               -> Error "Unknown failure"
+    | _ when Debug_param.Stream_file.capture_all_exn_in_unknown_err -> Error "Unknown error"
   ;;
 end

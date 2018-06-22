@@ -28,8 +28,8 @@ let print_meta ((block, pos):Block.t * int64) : unit =
     assert false
   else
     let open Metadata in
-    let uid : string  = Conv_utils.bytes_to_hex_string (Block.block_to_file_uid block) in
-    let ver : string  = Sbx_specs.ver_to_string (Block.block_to_ver block) in
+    let uid : string  = Conv_utils.string_to_hex_string_uid (Block.block_to_file_uid block) in
+    let ver : string  = Sbx_specs.ver_to_human_string (Block.block_to_ver block) in
     let metadata_list = dedup (Block.block_to_meta block) in
     let fnm : string option =
       match Misc_utils.list_find_option (function | FNM _ -> true | _ -> false) metadata_list with
@@ -61,32 +61,30 @@ let print_meta ((block, pos):Block.t * int64) : unit =
       | Some (HSH v) ->
         Some (Printf.sprintf "%s - %s"
                 (Multihash.hash_bytes_to_hash_type_string v)
-                (Conv_utils.bytes_to_hex_string (Multihash.hash_bytes_to_raw_hash v))
+                (Conv_utils.string_to_hex_string_hash (Multihash.hash_bytes_to_raw_hash v))
              )
       | None         -> None
       | _            -> assert false in
-    Printf.printf "Found at byte                : %Ld\n"
-      pos;
+    Printf.printf "Found at byte          : %Ld - 0x%LX\n"
+      pos pos;
     print_newline ();
-    Printf.printf "File UID                     : %s\n"
+    Printf.printf "File UID               : %s\n"
       uid;
-    Printf.printf "File name                    : %s\n"
+    Printf.printf "File name              : %s\n"
       (string_option_to_string fnm);
-    Printf.printf "Sbx container name           : %s\n"
+    Printf.printf "Sbx container name     : %s\n"
       (string_option_to_string snm);
-    Printf.printf "Sbx container version        : %s\n"
+    Printf.printf "Sbx container version  : %s\n"
       ver;
-    Printf.printf "File size                    : %s\n"
+    Printf.printf "File size              : %s\n"
       (uint64_option_to_string fsz);
-    Printf.printf "File modification time UTC   : %s\n"
-      (uint64_seconds_option_to_string fdt `UTC);
-    Printf.printf "Sbx encoding time      UTC   : %s\n"
-      (uint64_seconds_option_to_string sdt `UTC);
-    Printf.printf "File modification time local : %s\n"
+    Printf.printf "File modification time : %s (UTC)  %s (Local)\n"
+      (uint64_seconds_option_to_string fdt `UTC)
       (uint64_seconds_option_to_string fdt `Local);
-    Printf.printf "Sbx encoding time      local : %s\n"
+    Printf.printf "Sbx encoding time      : %s (UTC)  %s (Local)\n"
+      (uint64_seconds_option_to_string sdt `UTC)
       (uint64_seconds_option_to_string sdt `Local);
-    Printf.printf "Hash                         : %s\n"
+    Printf.printf "Hash                   : %s\n"
       (string_option_to_string hsh)
 ;;
 
@@ -103,15 +101,16 @@ let rec print_meta_blocks ?(cur:int64 = 0L) (lst:(Block.t * int64) list) : unit 
     end
 ;;
 
-let show (find_max:int64 option) (skip_to_byte:int64 option) (in_filename:string) : unit =
-  Param.Show.set_meta_list_max_length_possibly find_max;
+let show (silent:Progress_report.silence_level) (find_max:int64 option) (from_byte:int64 option) (to_byte:int64 option) (force_misalign:bool) (in_filename:string) : unit =
+  Dynamic_param.Show.set_meta_list_max_length_possibly find_max;
+  Dynamic_param.Common.set_silence_settings silent;
   try
     match find_max with
-    | Some 0L ->
+    | Some n when n <= 0L ->
       ()
-    | None    ->
+    | None                ->
       begin
-        match Process.fetch_single_meta ~skip_to_byte ~in_filename with
+        match Process.fetch_single_meta ~from_byte ~to_byte ~force_misalign ~in_filename with
         | Ok res    ->
           begin
             match res with
@@ -120,15 +119,15 @@ let show (find_max:int64 option) (skip_to_byte:int64 option) (in_filename:string
           end
         | Error str -> raise (Packaged_exn str)
       end
-    | _       ->
-      match Process.fetch_multi_meta ~skip_to_byte ~in_filename with
+    | _                   ->
+      match Process.fetch_multi_meta ~from_byte ~to_byte ~force_misalign ~in_filename with
       | Ok res    ->
         begin
           match res with
           | []         -> Printf.printf "No metadata blocks found\n"
           | lst        ->
             begin
-              Printf.printf "Showing first up to %Ld metadata blocks\n" !Param.Show.meta_list_max_length;
+              Printf.printf "Showing first up to %Ld metadata blocks\n" !Dynamic_param.Show.meta_list_max_length;
               print_newline ();
               print_meta_blocks lst
             end
@@ -141,14 +140,9 @@ let show (find_max:int64 option) (skip_to_byte:int64 option) (in_filename:string
 let find_max =
   let doc = "Find first up to $(docv)(defaults to 1) metadata blocks.
   If the default is used(this option not specified), total block number and block number indicators are not shown.
-  If a number is provided, then all the indicators are shown, regardless of the value of $(docv)" in
+  If a number is provided, then all the indicators are shown, regardless of the value of $(docv).
+  Negative values are treated as 0." in
   Arg.(value & opt (some int64) None & info ["find-max"] ~docv:"FIND-MAX" ~doc)
-;;
-
-let skip_to_byte =
-  let doc = Printf.sprintf "Skip to byte $(docv), the position is automatically rounded down to closest multiple of %d bytes"
-      Param.Rescue.scan_alignment in
-  Arg.(value & opt (some int64) None & info ["skip-to"] ~docv:"BYTE" ~doc)
 ;;
 
 let in_file =

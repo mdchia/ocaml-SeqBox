@@ -2,12 +2,7 @@ open Stdint
 open Sbx_specs
 open Sbx_block
 open Stream_file
-
-let (<+>) = Int64.add;;
-
-let (<->) = Int64.sub;;
-
-let (<*>) = Int64.mul;;
+open Int64_ops
 
 module Stats = struct
   type t = { block_size            : int
@@ -75,7 +70,7 @@ module Stats = struct
     ; data_blocks_decoded   = stats.data_blocks_decoded
     ; blocks_failed         = stats.blocks_failed         <+> 1L
     ; failed_block_pos_list =
-        if stats.blocks_failed < !Param.Decode.failure_list_max_length then
+        if stats.blocks_failed < !Dynamic_param.Decode.failure_list_max_length then
           stats.blocks_processed :: stats.failed_block_pos_list
         else
           stats.failed_block_pos_list
@@ -142,28 +137,28 @@ module Stats = struct
   ;;
 
   let print_stats (stats:t) : unit =
-    Printf.printf "Block size used in decoding                    : %d\n"  stats.block_size;
-    Printf.printf "Number of          blocks processed            : %Ld\n" stats.blocks_processed;
-    Printf.printf "Number of metadata blocks successfully decoded : %Ld\n" stats.meta_blocks_decoded;
-    Printf.printf "Number of data     blocks successfully decoded : %Ld\n" stats.data_blocks_decoded;
-    Printf.printf "Number of          blocks failed to decode     : %Ld\n" stats.blocks_failed;
-    let (hour, minute, second) = Progress_report.seconds_to_hms (int_of_float (Sys.time() -. stats.start_time)) in
-    Printf.printf "Time elapsed                                   : %02d:%02d:%02d\n" hour minute second;
-    Printf.printf "Recorded hash                                  : %s\n"
+    Printf.printf "Block size used in decoding                      : %d\n"  stats.block_size;
+    Printf.printf "Number of blocks processed                       : %Ld\n" stats.blocks_processed;
+    Printf.printf "Number of blocks successfully decoded (metadata) : %Ld\n" stats.meta_blocks_decoded;
+    Printf.printf "Number of blocks successfully decoded (data)     : %Ld\n" stats.data_blocks_decoded;
+    Printf.printf "Number of blocks failed to decode                : %Ld\n" stats.blocks_failed;
+    let (hour, minute, second) = Progress_report.Helper.seconds_to_hms (int_of_float (Sys.time() -. stats.start_time)) in
+    Printf.printf "Time elapsed                                     : %02d:%02d:%02d\n" hour minute second;
+    Printf.printf "Recorded hash                                    : %s\n"
       (match stats.recorded_hash with
        | Some hsh ->
          Printf.sprintf "%s - %s"
            (Multihash.hash_bytes_to_hash_type_string hsh)
-           (Conv_utils.bytes_to_hex_string (Multihash.hash_bytes_to_raw_hash hsh))
+           (Conv_utils.string_to_hex_string_hash (Multihash.hash_bytes_to_raw_hash hsh))
        | None     ->
          "N/A"
       );
-    Printf.printf "Hash of the output file                        : %s\n"
+    Printf.printf "Hash of the output file                          : %s\n"
       (match (stats.output_file_hash, stats.recorded_hash) with
        | (Some hsh, _     )     ->
          Printf.sprintf "%s - %s"
            (Multihash.hash_bytes_to_hash_type_string hsh)
-           (Conv_utils.bytes_to_hex_string (Multihash.hash_bytes_to_raw_hash hsh))
+           (Conv_utils.string_to_hex_string_hash (Multihash.hash_bytes_to_raw_hash hsh))
        | (None    , Some _)     ->
          "N/A - recorded hash type is not supported by osbx"
        | (None    , None  )     ->
@@ -191,7 +186,7 @@ module Stats = struct
       | (None,               None)                  ->
         Printf.printf "Neither recorded hash nor output file hash is available\n";
     end;
-    Printf.printf "First up to %Ld failing positions (block and bytes index start at 0)\n" !Param.Decode.failure_list_max_length;
+    Printf.printf "First up to %Ld failing positions (block and bytes index start at 0)\n" !Dynamic_param.Decode.failure_list_max_length;
     print_failed_pos stats.block_size stats.failed_block_pos_list
   ;;
 end
@@ -202,91 +197,65 @@ type scan_stats = Stats.scan_stats
 
 type hash_stats = Stats.hash_stats
 
-module Progress : sig
-  val report_scan                 : scan_stats -> in_channel -> unit
-
-  val report_decode               : stats      -> in_channel -> unit
-
-  val report_hash                 : hash_stats -> in_channel -> unit
-
-  val print_newline_possibly_scan : scan_stats -> in_channel -> unit
-
-end = struct
-
-  let print_scan_progress_helper =
-    let header         = "Scan progress" in
-    let unit           = "bytes" in
-    let print_interval = Param.Decode.progress_report_interval in
-    Progress_report.gen_print_generic ~header ~unit ~print_interval
+module Progress = struct
+  let { print_progress            = report_scan
+      ; print_newline_if_not_done = report_scan_print_newline_if_not_done
+      }
+    : (unit, scan_stats, in_channel) Progress_report.progress_print_functions =
+    Progress_report.gen_print_generic
+      ~header:"Scan progress"
+      ~silence_settings:Dynamic_param.Common.silence_settings
+      ~display_while_active:Progress_report_param.Decode.Scan_progress.display_while_active
+      ~display_on_finish:Progress_report_param.Decode.Scan_progress.display_on_finish
+      ~display_on_finish_early:Progress_report_param.Decode.Scan_progress.display_on_finish_early
+      ~unit:"bytes"
+      ~print_interval:Progress_report_param.Decode.progress_report_interval
+      ~eval_start_time:Sys.time
+      ~eval_units_so_far:(fun (stats:scan_stats) -> stats.bytes_processed)
+      ~eval_total_units:(fun in_file -> LargeFile.in_channel_length in_file)
   ;;
 
-  let print_scan_progress ~(stats:scan_stats) ~(total_bytes:int64) =
-    print_scan_progress_helper
-      ~start_time:stats.start_time
-      ~units_so_far:stats.bytes_processed
-      ~total_units:total_bytes
+  let { print_progress            = report_hash
+      ; _
+        (* ; print_newline_if_not_done = report_hash_print_newline_if_not_done *)
+      }
+    : (unit, hash_stats, in_channel) Progress_report.progress_print_functions =
+    Progress_report.gen_print_generic
+      ~header:"Hash progress"
+      ~silence_settings:Dynamic_param.Common.silence_settings
+      ~display_while_active:Progress_report_param.Decode.Hash_progress.display_while_active
+      ~display_on_finish:Progress_report_param.Decode.Hash_progress.display_on_finish
+      ~display_on_finish_early:Progress_report_param.Decode.Hash_progress.display_on_finish_early
+      ~unit:"bytes"
+      ~print_interval:Progress_report_param.Decode.progress_report_interval
+      ~eval_start_time:Sys.time
+      ~eval_units_so_far:(fun (stats:hash_stats) -> stats.bytes_processed)
+      ~eval_total_units:(fun in_file -> LargeFile.in_channel_length in_file)
   ;;
 
-  let report_scan : scan_stats -> in_channel -> unit =
-    (fun stats in_file ->
-       let total_bytes =
-         LargeFile.in_channel_length in_file in
-       print_scan_progress ~stats ~total_bytes
-    )
-  ;;
-
-  let print_decode_progress_helper =
-    let header         = "Data decoding progress" in
-    let unit           = "blocks" in
-    let print_interval = Param.Decode.progress_report_interval in
-    Progress_report.gen_print_generic ~header ~unit ~print_interval
-  ;;
-
-  let print_decode_progress ~(stats:stats) ~(total_blocks:int64) =
-    print_decode_progress_helper
-      ~start_time:stats.start_time
-      ~units_so_far:stats.blocks_processed
-      ~total_units:total_blocks
-  ;;
-
-  let report_decode : stats -> in_channel -> unit  =
-    (fun stats in_file ->
-       let block_size   : int64 =
-         Int64.of_int stats.block_size in
-       let total_blocks : int64 =
-         Int64.div
-           (Int64.add (LargeFile.in_channel_length in_file) (Int64.sub block_size 1L))
-           block_size in
-       print_decode_progress ~stats ~total_blocks
-    )
-  ;;
-
-  let print_hash_progress_helper =
-    let header         = "Hash progress" in
-    let unit           = "bytes" in
-    let print_interval = Param.Decode.progress_report_interval in
-    Progress_report.gen_print_generic ~header ~unit ~print_interval
-  ;;
-
-  let print_hash_progress ~(stats:hash_stats) ~(total_bytes:int64) =
-    print_hash_progress_helper
-      ~start_time:stats.start_time
-      ~units_so_far:stats.bytes_processed
-      ~total_units:total_bytes
-  ;;
-
-  let report_hash : hash_stats -> in_channel -> unit =
-    (fun stats in_file ->
-       let total_bytes =
-         LargeFile.in_channel_length in_file in
-       print_hash_progress ~stats ~total_bytes
-    )
-  ;;
-
-  let print_newline_possibly_scan (stats:scan_stats) (in_file:in_channel) : unit =
-    Progress_report.print_newline_if_not_done
-      ~units_so_far:stats.bytes_processed
-      ~total_units:(LargeFile.in_channel_length in_file)
+  let { print_progress            = report_decode
+      ; _
+        (* ; print_newline_if_not_done = report_decode_print_newline_if_not_done *)
+      }
+    : (unit, stats, stats * in_channel) Progress_report.progress_print_functions =
+    Progress_report.gen_print_generic
+      ~header:"Data decoding progress"
+      ~silence_settings:Dynamic_param.Common.silence_settings
+      ~display_while_active:Progress_report_param.Decode.Decode_progress.display_while_active
+      ~display_on_finish:Progress_report_param.Decode.Decode_progress.display_on_finish
+      ~display_on_finish_early:Progress_report_param.Decode.Decode_progress.display_on_finish_early
+      ~unit:"blocks"
+      ~print_interval:Progress_report_param.Decode.progress_report_interval
+      ~eval_start_time:Sys.time
+      ~eval_units_so_far:(fun (stats:stats) -> stats.blocks_processed)
+      ~eval_total_units:
+        (fun (stats, in_file) ->
+           let block_size =
+             Int64.of_int stats.Stats.block_size
+           and total_file_size =
+             LargeFile.in_channel_length in_file in
+           Int64.div total_file_size block_size
+        )
   ;;
 end
 
@@ -296,112 +265,51 @@ module Processor = struct
                           }
 
   let find_first_both_proc ~(prefer:Block.block_type) (in_file:in_channel) : find_both_result =
-    let open Read_chunk in
-    let len = Param.Decode.ref_block_scan_alignment in
+    let gen_raw_header_pred : find_both_result -> (Header.raw_header -> bool) =
+      let get_meta     = Header.raw_header_is_meta
+      and get_data     = Header.raw_header_is_data
+      and get_nothing  = (fun _ -> false)
+      and get_anything = (fun _ -> true) in
+      (function
+        | { meta = Some _; data = Some _ } -> get_nothing
+        | { meta = Some _; data = None   } -> get_data
+        | { meta = None  ; data = Some _ } -> get_meta
+        | { meta = None  ; data = None   } -> get_anything ) in
     let rec find_first_both_proc_internal (result_so_far:find_both_result) (stats:scan_stats) : scan_stats * find_both_result =
       (* report progress *)
-      Progress.report_scan stats in_file;
+      Progress.report_scan ~start_time_src:() ~units_so_far_src:stats ~total_units_src:in_file;
       match result_so_far with
-      | { meta = Some _; data = Some _ }                     -> (stats, result_so_far)
-      | { meta = Some _; data = _ }      when prefer = `Meta -> (stats, result_so_far)
-      | { meta = _;      data = Some _ } when prefer = `Data -> (stats, result_so_far)
-      | _                                                    ->
-        match read in_file ~len with
-        | None           -> (stats, result_so_far)
-        | Some { chunk } ->
-          if Bytes.length chunk < 16 then
-            (stats, result_so_far)
-          else
-            let test_header_bytes = Misc_utils.get_bytes chunk ~pos:0 ~len:16 in
-            let test_header : Header.raw_header option =
-              try
-                Some (Header.of_bytes test_header_bytes)
-              with
-              | Header.Invalid_bytes -> None in
-            match test_header with
-            | None            ->
-              let new_stats =
-                Stats.add_bytes_scanned stats ~num:(Int64.of_int (Bytes.length chunk)) in
-              find_first_both_proc_internal result_so_far new_stats (* go to next block *)
-            | Some raw_header ->
-              (* possibly grab more bytes depending on version *)
-              let chunk =
-                Processor_components.patch_block_bytes_if_needed in_file ~raw_header ~chunk in
-              let test_block : Block.t option =
-                Processor_components.bytes_to_block ~raw_header chunk in
-              let new_stats =
-                Stats.add_bytes_scanned stats ~num:(Int64.of_int (Bytes.length chunk)) in
-              match test_block with
-              | None       -> find_first_both_proc_internal result_so_far new_stats (* go to next block *)
-              | Some block ->
-                let new_result_so_far =
-                  { meta =
-                      begin
-                        match result_so_far.meta with
-                        | Some meta -> Some meta
-                        | None      -> if Block.is_meta block then Some block else None
-                      end
-                  ; data =
-                      begin
-                        match result_so_far.data with
-                        | Some data -> Some data
-                        | None      -> if Block.is_data block then Some block else None
-                      end
-                  } in
-                find_first_both_proc_internal new_result_so_far new_stats in
+      | { meta = Some _; data = Some _ }                                      -> (stats, result_so_far)
+      | { meta = Some _; data = _      } when prefer = `Meta || prefer = `Any -> (stats, result_so_far)
+      | { meta = _;      data = Some _ } when prefer = `Data || prefer = `Any -> (stats, result_so_far)
+      | _                                                                     ->
+        let raw_header_pred = gen_raw_header_pred result_so_far in
+        let (read_len, block) = Processor_components.try_get_block_from_in_channel ~raw_header_pred in_file in
+        if read_len = 0L then
+          (stats, result_so_far)
+        else
+          let new_stats = Stats.add_bytes_scanned stats ~num:read_len in
+          match block with
+          | None       -> find_first_both_proc_internal result_so_far new_stats
+          | Some block -> 
+            let new_result_so_far =
+              { meta =
+                  begin
+                    match result_so_far.meta with
+                    | Some _ as x -> x
+                    | None        -> if Block.is_meta block then Some block else None
+                  end
+              ; data =
+                  begin
+                    match result_so_far.data with
+                    | Some _ as x -> x
+                    | None        -> if Block.is_data block then Some block else None
+                  end
+              } in
+            find_first_both_proc_internal new_result_so_far new_stats in
     let (stats, res) = find_first_both_proc_internal { meta = None; data = None } (Stats.make_blank_scan_stats ()) in
     LargeFile.seek_in in_file 0L;  (* reset seek position *)
-    Progress.print_newline_possibly_scan stats in_file;
-    res
-  ;;
-
-  let find_first_block_proc ~(want:Block.block_type) (in_file:in_channel) : Block.t option =
-    let open Read_chunk in
-    let len = Param.Decode.ref_block_scan_alignment in 
-    let bytes_to_block (raw_header:Header.raw_header) (chunk:bytes) : Block.t option =
-      let want_block =
-        match want with
-        | `Meta -> Header.raw_header_is_meta raw_header
-        | `Data -> Header.raw_header_is_data raw_header in
-      if want_block then
-        Processor_components.bytes_to_block ~raw_header chunk
-      else
-        None in
-    let rec find_first_block_proc_internal (stats:scan_stats) (block:Block.t option) : scan_stats * (Block.t option) =
-      (* report progress *)
-      Progress.report_scan stats in_file;
-      match block with
-      | Some block -> (stats, Some block)
-      | None       ->
-        match read in_file ~len with
-        | None           -> (stats, None)
-        | Some { chunk } ->
-          if Bytes.length chunk < 16 then
-            (stats, None)  (* no more bytes left in file *)
-          else
-            let test_header_bytes = Misc_utils.get_bytes chunk ~pos:0 ~len:16 in
-            let test_header : Header.raw_header option =
-              try
-                Some (Header.of_bytes test_header_bytes)
-              with
-              | Header.Invalid_bytes -> None in
-            match test_header with
-            | None            -> 
-              let new_stats =
-                Stats.add_bytes_scanned stats ~num:(Int64.of_int (Bytes.length chunk)) in
-              find_first_block_proc_internal new_stats None (* go to next block *)
-            | Some raw_header ->
-              (* possibly grab more bytes depending on version *)
-              let chunk =
-                Processor_components.patch_block_bytes_if_needed in_file ~raw_header ~chunk in
-              let test_block : Block.t option =
-                bytes_to_block raw_header chunk in
-              let new_stats =
-                Stats.add_bytes_scanned stats ~num:(Int64.of_int (Bytes.length chunk)) in
-              find_first_block_proc_internal new_stats test_block in
-    let (stats, res) = find_first_block_proc_internal (Stats.make_blank_scan_stats ()) None in
-    LargeFile.seek_in in_file 0L;  (* reset seek position *)
-    Progress.print_newline_possibly_scan stats in_file;
+    Progress.report_scan_print_newline_if_not_done ~start_time_src:() ~units_so_far_src:stats ~total_units_src:in_file;
     res
   ;;
 
@@ -409,34 +317,39 @@ module Processor = struct
    *  block must match those two parameters to be accepted
    *)
   let find_valid_data_block_proc ~(ref_block:Block.t) (in_file:in_channel) ~(stats:stats) : stats * (Block.t option) =
-    let open Read_chunk in
-    let ref_ver      = Block.block_to_ver ref_block in
-    let len          = ver_to_block_size ref_ver in
-    let ref_file_uid = Block.block_to_file_uid ref_block in
-    let rec find_valid_data_block_proc_internal (stats:stats) : stats * Block.t option =
+    let ref_ver        = Block.block_to_ver ref_block in
+    let ref_file_uid   = Block.block_to_file_uid ref_block in
+    let ref_block_size = ver_to_block_size ref_ver in
+    let rec find_valid_data_block_proc_internal (stats:stats) (result_so_far:Block.t option) : stats * Block.t option =
       (* report progress *)
-      Progress.report_decode stats in_file;
-      match read in_file ~len with
-      | None           -> (stats, None)
-      | Some { chunk } ->
-        let block = Processor_components.bytes_to_block chunk in
-        match block with
-        | None       -> find_valid_data_block_proc_internal (Stats.add_failed_block stats) (* move onto finding next block *)
-        | Some block ->
-          begin
-            if Block.is_meta block then (
-              (* don't return metadata block *)
-              find_valid_data_block_proc_internal (Stats.add_okay_meta_block stats) (* move onto finding next block *) )
-            else
+      Progress.report_decode ~start_time_src:() ~units_so_far_src:stats ~total_units_src:(stats, in_file);
+      match result_so_far with
+      | Some _ as x -> (stats, x)
+      | None        ->
+        let (read_len, block) = Processor_components.try_get_block_from_in_channel ~fixed_ver:ref_ver in_file in
+        if read_len = 0L then
+          (stats, result_so_far)
+        else
+          let (new_stats, new_result) =
+            match block with
+            | Some block ->
               let file_uid = Block.block_to_file_uid block in
               let ver      = Block.block_to_ver      block in
-              (* make sure uid and version match *)
               if file_uid = ref_file_uid && ver = ref_ver then
-                (Stats.add_okay_data_block stats, Some block)
+                if Block.is_meta block then
+                  (Stats.add_okay_meta_block stats, None)       (* do not return metadata block *)
+                else
+                  (Stats.add_okay_data_block stats, Some block)
               else
-                find_valid_data_block_proc_internal (Stats.add_failed_block stats) (* move onto finding next block *)
-          end in
-    find_valid_data_block_proc_internal stats
+                (Stats.add_failed_block stats, None)
+            | None       ->
+              if read_len = Int64.of_int ref_block_size then
+                (Stats.add_failed_block stats, None)
+              else
+                (* reading in a chunk smaller than a block is not considered to be a failure *)
+                (stats,                        None) in
+          find_valid_data_block_proc_internal new_stats new_result in
+    find_valid_data_block_proc_internal stats None
   ;;
 
   let output_decoded_data_proc ~(ref_block:Block.t) ~(block:Block.t) (out_file:out_channel) : unit =
@@ -446,7 +359,7 @@ module Processor = struct
     else
       (* determine position to write to using reference block and block's sequence number *)
       let ref_ver           = Block.block_to_ver ref_block in
-      let data_len  : int64 = Int64.of_int    (ver_to_data_size ref_ver) in
+      let data_len  : int64 = Int64.of_int (ver_to_data_size ref_ver) in
       match Block.block_to_seq_num block with
       | None         -> assert false
       | Some seq_num ->
@@ -467,28 +380,34 @@ module Processor = struct
     decode_and_output_proc_internal (Stats.make_blank_stats ~ver:(Block.block_to_ver ref_block))
   ;;
 
-  let ref_block_fetcher (in_file:in_channel) : Block.t option =
-    Printf.printf "Scanning for reference block\n";
-    match find_first_both_proc ~prefer:`Meta in_file with
-    | { meta = Some block; data = _          } ->
-      begin
-        Printf.printf "Metadata block found\n";
-        Some block
-      end
-    | { meta = None      ; data = Some block } ->
-      begin
-        Printf.printf "No metadata blocks were found, resorting to data block\n";
-        Some block
-      end
-    | { meta = None      ; data = None       } -> None
+  let make_ref_block_fetcher ~(prefer:Block.block_type) : (Block.t option) Stream.in_processor =
+    (fun in_file ->
+       Printf.printf "Scanning for reference block\n";
+       match find_first_both_proc ~prefer in_file with
+       | { meta = Some block; data = _          } ->
+         begin
+           Printf.printf "Metadata block found\n";
+           Some block
+         end
+       | { meta = None      ; data = Some block } ->
+         begin
+           begin
+             match prefer with
+             | `Meta        -> Printf.printf "No metadata blocks were found, resorting to data block\n"
+             | `Data | `Any -> Printf.printf "Data block found\n"
+           end;
+           Some block
+         end
+       | { meta = None      ; data = None       } -> None
+    )
   ;;
 
   let make_decoder ~(ref_block:Block.t option) : (stats * (int64 option)) Stream.in_out_processor =
     (fun in_file out_file ->
        let ref_block : Block.t option =
          match ref_block with
-         | Some block as sb -> sb
-         | None             -> ref_block_fetcher in_file in
+         | Some _ as x -> x
+         | None        -> (make_ref_block_fetcher ~prefer:`Meta) in_file in
        match ref_block with
        | None           -> raise (Packaged_exn "No usable blocks in file")
        | Some ref_block ->
@@ -497,7 +416,7 @@ module Processor = struct
          (* if reference block is a metadata block, then use the recorded file size to indicate truncatation *)
          let truncate : int64 option =
            if Block.is_meta ref_block then
-             let metadata_list   = Block.block_to_meta ref_block in
+             let metadata_list = Block.block_to_meta ref_block in
              try
                let open Metadata in
                match List.find (function | FSZ _ -> true | _ -> false) metadata_list with
@@ -509,7 +428,7 @@ module Processor = struct
              None in
          let recorded_hash : Multihash.hash_bytes option =
            let open Metadata in
-           let metadata_list      = dedup (Block.block_to_meta ref_block) in
+           let metadata_list = dedup (Block.block_to_meta ref_block) in
            try
              match List.find (function | HSH _ -> true | _ -> false) metadata_list with
              | HSH hash_bytes -> Some hash_bytes
@@ -521,18 +440,18 @@ module Processor = struct
     )
   ;;
 
-  let make_hasher ~(hash_type:Multihash.hash_type) : bytes Stream.in_processor =
+  let make_hasher ~(hash_type:Multihash.hash_type) : string Stream.in_processor =
+    let read_len = 1024 * 1024 (* 1 MiB *) in
     (fun in_file ->
-       let rec hash_proc (stats:hash_stats) (hash_state:Multihash.Hash.ctx) (in_file:in_channel) : bytes =
+       let rec hash_proc (stats:hash_stats) (hash_state:Multihash.Hash.ctx) (in_file:in_channel) : string =
          let open Read_chunk in
-         let read_len = 1024 * 1024 (* 1 MiB *) in
-         Progress.report_hash stats in_file;
+         Progress.report_hash ~start_time_src:() ~units_so_far_src:stats ~total_units_src:in_file;
          match read in_file ~len:read_len with
          | None           -> Multihash.Hash.get_raw_hash hash_state
          | Some { chunk } ->
            Multihash.Hash.feed hash_state chunk;
            let new_stats =
-             Stats.add_bytes_hashed stats ~num:(Int64.of_int (Bytes.length chunk)) in
+             Stats.add_bytes_hashed stats ~num:(Int64.of_int (String.length chunk)) in
            hash_proc new_stats hash_state in_file in
        let stats      = Stats.make_blank_hash_stats () in
        let hash_state = Multihash.Hash.init hash_type in
@@ -542,16 +461,17 @@ module Processor = struct
 end
 
 module Process = struct
-  let fetch_ref_block ~(in_filename:string) : (Block.t option, string) result =
-    Stream.process_in ~in_filename Processor.ref_block_fetcher
+  let fetch_ref_block ~(prefer:Block.block_type) ~(in_filename:string) : (Block.t option, string) result =
+    let processor = Processor.make_ref_block_fetcher ~prefer in
+    Stream.process_in ~in_filename processor
   ;;
 
-  let hash_file ~(hash_type:Multihash.hash_type) ~(in_filename:string) : (bytes, string) result =
+  let hash_file ~(hash_type:Multihash.hash_type) ~(in_filename:string) : (string, string) result =
     let processor = Processor.make_hasher ~hash_type in
     Stream.process_in ~in_filename processor
   ;;
 
-  let hash_file_w_warning ~(hash_type:Multihash.hash_type) ~(in_filename:string) : bytes option =
+  let hash_file_w_warning ~(hash_type:Multihash.hash_type) ~(in_filename:string) : string option =
     match hash_file ~hash_type ~in_filename with
     | Ok hash   -> Some hash
     | Error msg -> Printf.printf "Warning : %s\n" msg; None
@@ -592,7 +512,7 @@ module Process = struct
           | Multihash.Length_mismatch -> assert false
           | _                         -> Error "Failed to truncate output file"
         end
-      | Ok (stats, None)            -> Ok stats
-      | Error msg as em             -> em
+      | Ok (stats, None) -> Ok stats
+      | Error _ as em    -> em
   ;;
 end
